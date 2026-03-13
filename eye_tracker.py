@@ -1,0 +1,537 @@
+# eye_tracker.py
+import cv2
+import time
+import math
+import mediapipe as mp
+import numpy as np
+import urllib.request
+import os
+from utils import LEFT_EYE, RIGHT_EYE, calculate_distance, COLORS
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+import json
+from collections import deque
+
+
+class KalmanFilter2D:
+    """2D фильтр Калмана для сглаживания координат"""
+    
+    def __init__(self, process_noise=0.01, measurement_noise=0.1):
+        self.kf = cv2.KalmanFilter(4, 2)
+        self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+        self.kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], 
+                                             [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * process_noise
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
+        self.initialized = False
+        self.process_noise = process_noise
+        self.measurement_noise = measurement_noise
+        
+    def update(self, x, y):
+        if not self.initialized:
+            self.kf.statePost = np.array([x, y, 0, 0], np.float32)
+            self.initialized = True
+            return x, y
+        
+        self.kf.predict()
+        measurement = np.array([x, y], np.float32)
+        self.kf.correct(measurement)
+        estimated = self.kf.statePost
+        return int(estimated[0]), int(estimated[1])
+    
+    def reset(self):
+        self.initialized = False
+    
+    def update_params(self, process_noise, measurement_noise):
+        """Обновление параметров фильтра"""
+        self.process_noise = process_noise
+        self.measurement_noise = measurement_noise
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * process_noise
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
+
+
+class EyeTracker:
+    def __init__(self, model_path="face_landmarker.task", 
+                 min_detection_confidence=0.5,
+                 min_tracking_confidence=0.5,
+                 min_presence_confidence=0.5,
+                 smoothing_factor=0.7,
+                 use_kalman=True,
+                 kalman_process_noise=0.01,
+                 kalman_measurement_noise=0.1,
+                 velocity_threshold=100,       # не используется в фильтрации
+                 fixation_threshold=20,         # не используется
+                 max_prediction_time=0.3,
+                 min_face_size=100,             # не используется
+                 max_jump_distance=100,
+                 median_filter_size=3,
+                 use_outlier_filter=True,
+                 use_median_filter=True):
+        """
+        Полная версия трекера со всеми настройками
+        """
+        self.model_path = model_path
+        self.min_detection_confidence = min_detection_confidence
+        self.min_tracking_confidence = min_tracking_confidence
+        self.min_presence_confidence = min_presence_confidence
+        self.smoothing_factor = smoothing_factor
+        self.use_kalman = use_kalman
+        self.kalman_process_noise = kalman_process_noise
+        self.kalman_measurement_noise = kalman_measurement_noise
+        self.velocity_threshold = velocity_threshold
+        self.fixation_threshold = fixation_threshold
+        self.max_prediction_time = max_prediction_time
+        self.min_face_size = min_face_size
+        
+        # Параметры фильтрации
+        self.max_jump_distance = max_jump_distance
+        self.median_filter_size = median_filter_size if median_filter_size % 2 == 1 else 3
+        self.use_outlier_filter = use_outlier_filter
+        self.use_median_filter = use_median_filter
+        
+        self.landmarker = None
+        self.cap = None
+        self.is_running = False
+        self.tracker_enabled = True
+        
+        # Данные глаз
+        self.left_eye = {'x': 0, 'y': 0, 'diameter': 0, 'speed': 0}
+        self.right_eye = {'x': 0, 'y': 0, 'diameter': 0, 'speed': 0}
+        
+        # Для сглаживания
+        self.smoothed_left = {'x': 0, 'y': 0, 'diameter': 0}
+        self.smoothed_right = {'x': 0, 'y': 0, 'diameter': 0}
+        
+        # Буферы для медианного фильтра
+        if self.use_median_filter:
+            self.left_x_buffer = deque(maxlen=self.median_filter_size)
+            self.left_y_buffer = deque(maxlen=self.median_filter_size)
+            self.right_x_buffer = deque(maxlen=self.median_filter_size)
+            self.right_y_buffer = deque(maxlen=self.median_filter_size)
+            self.left_d_buffer = deque(maxlen=self.median_filter_size)
+            self.right_d_buffer = deque(maxlen=self.median_filter_size)
+        
+        # Фильтры Калмана
+        if self.use_kalman:
+            self.kalman_left = KalmanFilter2D(kalman_process_noise, kalman_measurement_noise)
+            self.kalman_right = KalmanFilter2D(kalman_process_noise, kalman_measurement_noise)
+            self.last_detection_time = {'left': 0, 'right': 0}
+        
+        # Для расчета скорости
+        self.prev_x = None
+        self.prev_y = None
+        self.prev_time = None
+        self.start_time = 0
+        
+        # История для графиков
+        self.history = {
+            'x': [], 'y': [], 'speed': [], 'diameter': [], 'timestamps': []
+        }
+        
+        # Callback для обработки кадров (не используется)
+        self.frame_callback = None
+
+        self.load_settings_from_file()
+
+    def load_settings_from_file(self):
+        """Загрузка настроек из файла tracker_settings.json"""
+        settings_file = "tracker_settings.json"
+        if os.path.exists(settings_file):
+            try:
+                with open(settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    self.update_all_settings(settings)
+                    print("Настройки загружены из tracker_settings.json")
+            except Exception as e:
+                print(f"Ошибка загрузки настроек: {e}")
+
+    def update_all_settings(self, settings):
+        """Обновление всех настроек трекера"""
+        try:
+            # Параметры детекции
+            if 'min_detection_confidence' in settings:
+                self.min_detection_confidence = settings['min_detection_confidence']
+            if 'min_tracking_confidence' in settings:
+                self.min_tracking_confidence = settings['min_tracking_confidence']
+            if 'min_presence_confidence' in settings:
+                self.min_presence_confidence = settings['min_presence_confidence']
+            
+            # Параметры сглаживания
+            if 'smoothing_factor' in settings:
+                self.smoothing_factor = settings['smoothing_factor']
+            if 'use_kalman' in settings:
+                self.use_kalman = settings['use_kalman']
+            
+            # Параметры фильтра Калмана
+            if 'kalman_process_noise' in settings:
+                self.kalman_process_noise = settings['kalman_process_noise']
+            if 'kalman_measurement_noise' in settings:
+                self.kalman_measurement_noise = settings['kalman_measurement_noise']
+            
+            # Параметры анализа
+            if 'velocity_threshold' in settings:
+                self.velocity_threshold = settings['velocity_threshold']
+            if 'fixation_threshold' in settings:
+                self.fixation_threshold = settings['fixation_threshold']
+            if 'max_prediction_time' in settings:
+                self.max_prediction_time = settings['max_prediction_time']
+            if 'min_face_size' in settings:
+                self.min_face_size = settings['min_face_size']
+            
+            # Параметры фильтрации
+            if 'max_jump_distance' in settings:
+                self.max_jump_distance = settings['max_jump_distance']
+            if 'median_filter_size' in settings:
+                self.median_filter_size = settings['median_filter_size']
+                if self.use_median_filter:
+                    self.left_x_buffer = deque(maxlen=self.median_filter_size)
+                    self.left_y_buffer = deque(maxlen=self.median_filter_size)
+                    self.right_x_buffer = deque(maxlen=self.median_filter_size)
+                    self.right_y_buffer = deque(maxlen=self.median_filter_size)
+                    self.left_d_buffer = deque(maxlen=self.median_filter_size)
+                    self.right_d_buffer = deque(maxlen=self.median_filter_size)
+            if 'use_outlier_filter' in settings:
+                self.use_outlier_filter = settings['use_outlier_filter']
+            if 'use_median_filter' in settings:
+                self.use_median_filter = settings['use_median_filter']
+                if self.use_median_filter:
+                    self.left_x_buffer = deque(maxlen=self.median_filter_size)
+                    self.left_y_buffer = deque(maxlen=self.median_filter_size)
+                    self.right_x_buffer = deque(maxlen=self.median_filter_size)
+                    self.right_y_buffer = deque(maxlen=self.median_filter_size)
+                    self.left_d_buffer = deque(maxlen=self.median_filter_size)
+                    self.right_d_buffer = deque(maxlen=self.median_filter_size)
+            
+            # Обновляем параметры фильтров Калмана
+            if self.use_kalman and hasattr(self, 'kalman_left'):
+                self.kalman_left.update_params(self.kalman_process_noise, self.kalman_measurement_noise)
+                self.kalman_right.update_params(self.kalman_process_noise, self.kalman_measurement_noise)
+            
+            # Перезапускаем если запущен
+            if self.is_running:
+                self.restart()
+                
+            return True
+        except Exception as e:
+            print(f"Ошибка обновления настроек: {e}")
+            return False
+        
+    def update_settings(self, min_detection_confidence=None, smoothing_factor=None):
+        """Для совместимости"""
+        if min_detection_confidence is not None:
+            self.min_detection_confidence = min_detection_confidence
+        if smoothing_factor is not None:
+            self.smoothing_factor = smoothing_factor
+        
+        if self.is_running:
+            self.restart()
+    
+    def toggle_tracker(self):
+        """Включение/выключение трекера"""
+        self.tracker_enabled = not self.tracker_enabled
+        return self.tracker_enabled
+    
+    def restart(self):
+        """Перезапуск трекера с новыми настройками"""
+        was_running = self.is_running
+        if was_running:
+            self.stop()
+        if was_running:
+            self.start(self.frame_callback)
+    
+    def reset_state(self):
+        """Сброс состояния трекера (буферы, фильтры) для начала новой сессии"""
+        self.history = {'x': [], 'y': [], 'speed': [], 'diameter': [], 'timestamps': []}
+        self.prev_x = self.prev_y = self.prev_time = None
+        self.left_eye = {'x': 0, 'y': 0, 'diameter': 0, 'speed': 0}
+        self.right_eye = {'x': 0, 'y': 0, 'diameter': 0, 'speed': 0}
+        self.smoothed_left = {'x': 0, 'y': 0, 'diameter': 0}
+        self.smoothed_right = {'x': 0, 'y': 0, 'diameter': 0}
+        
+        # Сброс фильтров Калмана
+        if self.use_kalman:
+            self.kalman_left = KalmanFilter2D(self.kalman_process_noise, self.kalman_measurement_noise)
+            self.kalman_right = KalmanFilter2D(self.kalman_process_noise, self.kalman_measurement_noise)
+            self.last_detection_time = {'left': 0, 'right': 0}
+        
+        # Очистка буферов медианного фильтра
+        if self.use_median_filter:
+            self.left_x_buffer.clear()
+            self.left_y_buffer.clear()
+            self.right_x_buffer.clear()
+            self.right_y_buffer.clear()
+            self.left_d_buffer.clear()
+            self.right_d_buffer.clear()
+    
+    def download_model(self, status_callback=None):
+        """Скачивает модель если её нет"""
+        if os.path.exists(self.model_path):
+            return True
+        
+        url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+        
+        if status_callback:
+            status_callback("Скачивание модели. Ожидание.")
+        
+        try:
+            urllib.request.urlretrieve(url, self.model_path)
+            if status_callback:
+                status_callback("Модель загружена")
+            return True
+        except Exception as e:
+            print(f"Ошибка скачивания модели: {e}")
+            return False
+    
+    def start(self, frame_callback=None):
+        """Запуск трекинга (режим реального времени)"""
+        self.frame_callback = frame_callback
+        self.is_running = True
+        self.tracker_enabled = True
+        
+        # Сброс состояния
+        self.reset_state()
+        
+        # Настройка MediaPipe
+        base_options = python.BaseOptions(model_asset_path=self.model_path)
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.LIVE_STREAM,
+            num_faces=1,
+            min_face_detection_confidence=self.min_detection_confidence,
+            min_face_presence_confidence=self.min_presence_confidence,
+            min_tracking_confidence=self.min_tracking_confidence,
+            result_callback=self._process_frame
+        )
+        
+        self.landmarker = vision.FaceLandmarker.create_from_options(options)
+        
+        # Запуск камеры
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        self.start_time = time.time()
+        self.last_frame_time = time.time()
+        
+        return self.cap.isOpened()
+    
+    def stop(self):
+        """Остановка трекинга"""
+        self.is_running = False
+        
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        
+        if self.landmarker:
+            self.landmarker.close()
+            self.landmarker = None
+    
+    def _apply_smoothing(self, new_value, smoothed_value):
+        """Применяет экспоненциальное сглаживание"""
+        if smoothed_value == 0:
+            return new_value
+        return self.smoothing_factor * smoothed_value + (1 - self.smoothing_factor) * new_value
+    
+    def _is_outlier(self, new_x, new_y, prev_x, prev_y):
+        """Проверка на выброс по максимальному перемещению"""
+        if prev_x is None or prev_y is None:
+            return False
+        distance = math.hypot(new_x - prev_x, new_y - prev_y)
+        return distance > self.max_jump_distance
+    
+    def _apply_median_filter(self, buffer, new_value):
+        """Применение медианного фильтра"""
+        buffer.append(new_value)
+        if len(buffer) == buffer.maxlen:
+            return sorted(buffer)[len(buffer)//2]
+        return new_value
+    
+    def _get_eye_data(self, face_landmarks, img_w, img_h, eye_type):
+        """Получает сырые данные для конкретного глаза"""
+        if eye_type == 'left':
+            indices = LEFT_EYE
+        else:
+            indices = RIGHT_EYE
+        
+        center = face_landmarks[indices['center']]
+        p_right = face_landmarks[indices['right']]
+        p_left = face_landmarks[indices['left']]
+        
+        x = int(center.x * img_w)
+        y = int(center.y * img_h)
+        diameter = calculate_distance(p_right, p_left, img_w, img_h)
+        
+        return x, y, diameter
+    
+    def _calculate_speed(self, x, y, current_time):
+        """Расчёт скорости движения"""
+        if self.prev_x is not None and self.prev_time is not None:
+            dist = math.hypot(x - self.prev_x, y - self.prev_y)
+            time_diff = current_time - self.prev_time
+            if time_diff > 0:
+                return dist / time_diff
+        return 0.0
+    
+    def filter_measurements(self, left_x, left_y, left_d, right_x, right_y, right_d, current_time):
+        """
+        Применяет все включённые фильтры к сырым измерениям глаз.
+        Обновляет состояние трекера (self.left_eye, self.right_eye, буферы, скорость).
+        """
+        # 1. Фильтр резких скачков (выбросы)
+        if self.use_outlier_filter and self.prev_x is not None:
+            # Проверяем левый глаз как основной (можно проверять оба, но для скорости используем левый)
+            if self._is_outlier(left_x, left_y, self.prev_x, self.prev_y):
+                # Замена выброса: используем предсказание Калмана или предыдущее значение
+                if self.use_kalman:
+                    left_x, left_y = self.kalman_left.update(0, 0)
+                    right_x, right_y = self.kalman_right.update(0, 0)
+                else:
+                    left_x, left_y = self.prev_x, self.prev_y
+                    right_x, right_y = self.prev_x, self.prev_y  # приблизительно
+
+        # 2. Медианный фильтр (дрожание)
+        if self.use_median_filter:
+            left_x = self._apply_median_filter(self.left_x_buffer, left_x)
+            left_y = self._apply_median_filter(self.left_y_buffer, left_y)
+            right_x = self._apply_median_filter(self.right_x_buffer, right_x)
+            right_y = self._apply_median_filter(self.right_y_buffer, right_y)
+            left_d = self._apply_median_filter(self.left_d_buffer, left_d)
+            right_d = self._apply_median_filter(self.right_d_buffer, right_d)
+
+        # 3. Фильтр Калмана (если включён и не было выброса, но сейчас применяем всегда)
+        if self.use_kalman:
+            left_x, left_y = self.kalman_left.update(left_x, left_y)
+            right_x, right_y = self.kalman_right.update(right_x, right_y)
+
+        # 4. Экспоненциальное сглаживание
+        self.smoothed_left['x'] = self._apply_smoothing(left_x, self.smoothed_left['x'])
+        self.smoothed_left['y'] = self._apply_smoothing(left_y, self.smoothed_left['y'])
+        self.smoothed_left['diameter'] = self._apply_smoothing(left_d, self.smoothed_left['diameter'])
+
+        self.smoothed_right['x'] = self._apply_smoothing(right_x, self.smoothed_right['x'])
+        self.smoothed_right['y'] = self._apply_smoothing(right_y, self.smoothed_right['y'])
+        self.smoothed_right['diameter'] = self._apply_smoothing(right_d, self.smoothed_right['diameter'])
+
+        # Итоговые значения после всех фильтров
+        left_x = int(self.smoothed_left['x'])
+        left_y = int(self.smoothed_left['y'])
+        left_d = self.smoothed_left['diameter']
+        right_x = int(self.smoothed_right['x'])
+        right_y = int(self.smoothed_right['y'])
+        right_d = self.smoothed_right['diameter']
+
+        # 5. Расчёт скорости (используем левый глаз)
+        speed = self._calculate_speed(left_x, left_y, current_time)
+        self.prev_x, self.prev_y, self.prev_time = left_x, left_y, current_time
+
+        # 6. Обновление данных глаз
+        self.left_eye.update({
+            'x': left_x,
+            'y': left_y,
+            'diameter': left_d,
+            'speed': speed
+        })
+        self.right_eye.update({
+            'x': right_x,
+            'y': right_y,
+            'diameter': right_d,
+            'speed': speed   # можно использовать отдельную скорость для правого глаза, но для простоты оставим общую
+        })
+
+        # 7. Сохранение в историю
+        rel_time = current_time - self.start_time if self.start_time else current_time
+        self.history['x'].append(left_x)
+        self.history['y'].append(left_y)
+        self.history['diameter'].append(left_d)
+        self.history['speed'].append(speed)
+        self.history['timestamps'].append(rel_time)
+    
+    def _process_frame(self, result, output_image, timestamp_ms):
+        """Обработка кадра (callback для LIVE_STREAM)"""
+        current_time = timestamp_ms / 1000.0
+        rel_time = current_time - self.start_time
+        
+        if not result.face_landmarks or not self.tracker_enabled:
+            
+            # При потере трекинга используем предсказание Калмана
+            if self.use_kalman and hasattr(self, 'last_detection_time'):
+                time_since_detection = current_time - max(
+                    self.last_detection_time.get('left', 0),
+                    self.last_detection_time.get('right', 0)
+                )
+                
+                if time_since_detection < self.max_prediction_time:
+                    left_x, left_y = self.kalman_left.update(0, 0)
+                    right_x, right_y = self.kalman_right.update(0, 0)
+                    
+                    self.left_eye['x'] = left_x
+                    self.left_eye['y'] = left_y
+                    self.right_eye['x'] = right_x
+                    self.right_eye['y'] = right_y
+            return
+        
+        
+        face_landmarks = result.face_landmarks[0]
+        img_w, img_h = output_image.width, output_image.height
+        
+        # Получаем сырые данные для обоих глаз
+        left_x, left_y, left_d = self._get_eye_data(face_landmarks, img_w, img_h, 'left')
+        right_x, right_y, right_d = self._get_eye_data(face_landmarks, img_w, img_h, 'right')
+        
+        # Применяем все фильтры через единый метод
+        self.filter_measurements(left_x, left_y, left_d,
+                                 right_x, right_y, right_d,
+                                 current_time)
+    
+    def draw_eyes(self, frame):
+        """Отрисовка глаз на кадре - гарантированно рисует оба глаза"""
+        if self.tracker_enabled:
+            # Левый глаз
+            if self.left_eye['x'] != 0 and self.left_eye['y'] != 0:
+                color = COLORS['left_eye']
+                cv2.circle(frame, (self.left_eye['x'], self.left_eye['y']), 3, color, -1)
+                radius = int(self.left_eye['diameter'] / 2)
+                if radius > 0:
+                    cv2.circle(frame, (self.left_eye['x'], self.left_eye['y']), radius, color, 2)
+                cv2.putText(frame, "L", (self.left_eye['x'] - 20, self.left_eye['y'] - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            else:
+                cv2.putText(frame, "L: not found", (50, 100),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            
+            # Правый глаз
+            if self.right_eye['x'] != 0 and self.right_eye['y'] != 0:
+                color = COLORS['right_eye']
+                cv2.circle(frame, (self.right_eye['x'], self.right_eye['y']), 3, color, -1)
+                radius = int(self.right_eye['diameter'] / 2)
+                if radius > 0:
+                    cv2.circle(frame, (self.right_eye['x'], self.right_eye['y']), radius, color, 2)
+                cv2.putText(frame, "R", (self.right_eye['x'] + 10, self.right_eye['y'] - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            else:
+                cv2.putText(frame, "R: not found", (50, 120),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        # Статус трекера
+        status = "TRACKING ON" if self.tracker_enabled else "TRACKING OFF"
+        color = (0, 255, 0) if self.tracker_enabled else (0, 0, 255)
+        cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        
+        return frame
+    
+    def process_frame(self, frame):
+        """Обработка одного кадра для реального времени"""
+        if not self.is_running or not self.cap:
+            return frame
+        
+        if self.tracker_enabled:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            
+            frame_timestamp_ms = int(time.time() * 1000)
+            self.landmarker.detect_async(mp_image, frame_timestamp_ms)
+        
+        frame = self.draw_eyes(frame)
+        
+        return frame

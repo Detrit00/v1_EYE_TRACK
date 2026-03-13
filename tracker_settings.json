@@ -1,0 +1,13 @@
+{
+    "min_detection_confidence": 0.55,
+    "min_tracking_confidence": 0.2,
+    "min_presence_confidence": 0.35,
+    "smoothing_factor": 0.4,
+    "use_kalman": false,
+    "kalman_process_noise": 0.049,
+    "kalman_measurement_noise": 0.1,
+    "velocity_threshold": 500.0,
+    "fixation_threshold": 60.0,
+    "max_prediction_time": 0.55,
+    "min_face_size": 150.0
+}
