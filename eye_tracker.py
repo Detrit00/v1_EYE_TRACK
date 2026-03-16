@@ -59,14 +59,23 @@ class EyeTracker:
                  use_kalman=True,
                  kalman_process_noise=0.01,
                  kalman_measurement_noise=0.1,
-                 velocity_threshold=100,       # не используется в фильтрации
-                 fixation_threshold=20,         # не используется
+                 velocity_threshold=100,
+                 fixation_threshold=20,
                  max_prediction_time=0.3,
-                 min_face_size=100,             # не используется
+                 min_face_size=100,
                  max_jump_distance=100,
                  median_filter_size=3,
                  use_outlier_filter=True,
-                 use_median_filter=True):
+                 use_median_filter=True,
+                 # Параметры для метода контуров (новый метод)
+                 use_contour_method=True,
+                 contour_gaussian_blur=21,
+                 contour_threshold_offset=6,
+                 contour_morph_kernel=3,
+                 contour_min_area_ratio=0.01,
+                 contour_max_area_ratio=0.3,
+                 contour_use_morph=True,
+                 pupil_fallback_ratio=0.3):
         """
         Полная версия трекера со всеми настройками
         """
@@ -88,6 +97,16 @@ class EyeTracker:
         self.median_filter_size = median_filter_size if median_filter_size % 2 == 1 else 3
         self.use_outlier_filter = use_outlier_filter
         self.use_median_filter = use_median_filter
+        
+        # Параметры для метода контуров
+        self.use_contour_method = use_contour_method
+        self.contour_gaussian_blur = contour_gaussian_blur if contour_gaussian_blur % 2 == 1 else 21
+        self.contour_threshold_offset = contour_threshold_offset
+        self.contour_morph_kernel = contour_morph_kernel
+        self.contour_min_area_ratio = contour_min_area_ratio
+        self.contour_max_area_ratio = contour_max_area_ratio
+        self.contour_use_morph = contour_use_morph
+        self.pupil_fallback_ratio = pupil_fallback_ratio
         
         self.landmarker = None
         self.cap = None
@@ -128,7 +147,7 @@ class EyeTracker:
             'x': [], 'y': [], 'speed': [], 'diameter': [], 'timestamps': []
         }
         
-        # Callback для обработки кадров (не используется)
+        # Callback для обработки кадров
         self.frame_callback = None
 
         self.load_settings_from_file()
@@ -201,6 +220,26 @@ class EyeTracker:
                     self.right_y_buffer = deque(maxlen=self.median_filter_size)
                     self.left_d_buffer = deque(maxlen=self.median_filter_size)
                     self.right_d_buffer = deque(maxlen=self.median_filter_size)
+            
+            # Параметры для метода контуров
+            if 'use_contour_method' in settings:
+                self.use_contour_method = settings['use_contour_method']
+            if 'contour_gaussian_blur' in settings:
+                self.contour_gaussian_blur = settings['contour_gaussian_blur']
+                if self.contour_gaussian_blur % 2 == 0:
+                    self.contour_gaussian_blur += 1
+            if 'contour_threshold_offset' in settings:
+                self.contour_threshold_offset = settings['contour_threshold_offset']
+            if 'contour_morph_kernel' in settings:
+                self.contour_morph_kernel = settings['contour_morph_kernel']
+            if 'contour_min_area_ratio' in settings:
+                self.contour_min_area_ratio = settings['contour_min_area_ratio']
+            if 'contour_max_area_ratio' in settings:
+                self.contour_max_area_ratio = settings['contour_max_area_ratio']
+            if 'contour_use_morph' in settings:
+                self.contour_use_morph = settings['contour_use_morph']
+            if 'pupil_fallback_ratio' in settings:
+                self.pupil_fallback_ratio = settings['pupil_fallback_ratio']
             
             # Обновляем параметры фильтров Калмана
             if self.use_kalman and hasattr(self, 'kalman_left'):
@@ -347,22 +386,142 @@ class EyeTracker:
             return sorted(buffer)[len(buffer)//2]
         return new_value
     
-    def _get_eye_data(self, face_landmarks, img_w, img_h, eye_type):
-        """Получает сырые данные для конкретного глаза"""
+    def _find_pupil_by_contour(self, gray_roi, roi_x_offset, roi_y_offset):
+        """
+        Находит зрачок методом контуров (бинаризация + поиск контура)
+        Возвращает (x, y, diameter) в координатах исходного изображения
+        """
+        # Сохраняем исходное изображение для отладки (если нужно)
+        rows, cols = gray_roi.shape
+        
+        # 1. Гауссово размытие
+        blur_size = (self.contour_gaussian_blur, self.contour_gaussian_blur)
+        blurred = cv2.GaussianBlur(gray_roi, blur_size, 0)
+        
+        # 2. Бинаризация
+        min_val = np.min(blurred)
+        thresh_val = min_val + self.contour_threshold_offset
+        _, threshold = cv2.threshold(blurred, thresh_val, 255, cv2.THRESH_BINARY_INV)
+        
+        # 3. Морфологические операции (опционально)
+        if self.contour_use_morph:
+            kernel = np.ones((self.contour_morph_kernel, self.contour_morph_kernel), np.uint8)
+            threshold = cv2.morphologyEx(threshold, cv2.MORPH_CLOSE, kernel)
+            threshold = cv2.morphologyEx(threshold, cv2.MORPH_OPEN, kernel)
+        
+        # 4. Поиск контуров
+        contours, _ = cv2.findContours(threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None, None, None, threshold  # Возвращаем threshold для отладки
+        
+        # 5. Сортируем по убыванию площади
+        contours = sorted(contours, key=lambda x: cv2.contourArea(x), reverse=True)
+        
+        # 6. Вычисляем ожидаемую площадь зрачка (относительно ROI)
+        roi_area = rows * cols
+        min_area = roi_area * self.contour_min_area_ratio
+        max_area = roi_area * self.contour_max_area_ratio
+        
+        # 7. Ищем подходящий контур
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            
+            # Проверяем площадь
+            if area < min_area or area > max_area:
+                continue
+            
+            # Получаем ограничивающий прямоугольник
+            x, y, w, h = cv2.boundingRect(cnt)
+            
+            # Проверяем, что прямоугольник не слишком вытянутый
+            aspect_ratio = w / h if h > 0 else 0
+            if aspect_ratio < 0.5 or aspect_ratio > 2.0:
+                continue
+            
+            # Вычисляем центр и диаметр
+            center_x = x + w // 2
+            center_y = y + h // 2
+            diameter = (w + h) // 2  # Среднее между шириной и высотой
+            
+            # Переводим в координаты исходного изображения
+            abs_x = center_x + roi_x_offset
+            abs_y = center_y + roi_y_offset
+            
+            return abs_x, abs_y, diameter, threshold
+        
+        return None, None, None, threshold
+    
+    def _get_eye_data(self, face_landmarks, image, eye_type):
+        """
+        Получает данные для глаза: центр зрачка и его диаметр (пиксели).
+        Использует метод контуров (бинаризация + поиск контура).
+        """
         if eye_type == 'left':
             indices = LEFT_EYE
         else:
             indices = RIGHT_EYE
+
+        # Координаты углов глаза (нормированные)
+        left_corner = face_landmarks[indices['left']]
+        right_corner = face_landmarks[indices['right']]
         
-        center = face_landmarks[indices['center']]
-        p_right = face_landmarks[indices['right']]
-        p_left = face_landmarks[indices['left']]
-        
-        x = int(center.x * img_w)
-        y = int(center.y * img_h)
-        diameter = calculate_distance(p_right, p_left, img_w, img_h)
-        
-        return x, y, diameter
+        # Также можно использовать верхнюю и нижнюю точки века, если они есть
+        # Для расширения словаря LEFT_EYE и RIGHT_EYE можно добавить ключи 'upper' и 'lower'
+        # Но пока используем углы с запасом
+
+        h, w, _ = image.shape
+
+        # Абсолютные координаты углов
+        x_left = int(left_corner.x * w)
+        y_left = int(left_corner.y * h)
+        x_right = int(right_corner.x * w)
+        y_right = int(right_corner.y * h)
+
+        # Определяем ROI с запасом
+        margin = 30  # Увеличим отступ для метода контуров
+        x_min = max(0, min(x_left, x_right) - margin)
+        x_max = min(w, max(x_left, x_right) + margin)
+        y_min = max(0, min(y_left, y_right) - margin)
+        y_max = min(h, max(y_left, y_right) + margin)
+
+        # Если ROI слишком мал, возвращаем fallback
+        if x_max - x_min < 20 or y_max - y_min < 20:
+            center_x = (x_left + x_right) // 2
+            center_y = (y_left + y_right) // 2
+            eye_width = math.hypot(x_right - x_left, y_right - y_left)
+            diameter = eye_width * self.pupil_fallback_ratio
+            return center_x, center_y, diameter
+
+        # Вырезаем ROI
+        roi = image[y_min:y_max, x_min:x_max]
+        gray_roi = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+
+        # Если включён метод контуров
+        if self.use_contour_method:
+            pupil_x, pupil_y, diameter, threshold = self._find_pupil_by_contour(
+                gray_roi, x_min, y_min
+            )
+            
+            # Для отладки можно сохранять threshold (но в реальном времени не рекомендуется)
+            # Если нужно визуализировать threshold, можно добавить отдельный режим
+            
+            if pupil_x is not None:
+                return pupil_x, pupil_y, diameter
+            else:
+                # Fallback если зрачок не найден
+                center_x = (x_left + x_right) // 2
+                center_y = (y_left + y_right) // 2
+                eye_width = math.hypot(x_right - x_left, y_right - y_left)
+                diameter = eye_width * self.pupil_fallback_ratio
+                return center_x, center_y, diameter
+        else:
+            # Если метод контуров отключён, возвращаем старые данные (центр глаза и его ширину)
+            center_x = (x_left + x_right) // 2
+            center_y = (y_left + y_right) // 2
+            eye_width = math.hypot(x_right - x_left, y_right - y_left)
+            diameter = eye_width
+            return center_x, center_y, diameter
     
     def _calculate_speed(self, x, y, current_time):
         """Расчёт скорости движения"""
@@ -380,15 +539,13 @@ class EyeTracker:
         """
         # 1. Фильтр резких скачков (выбросы)
         if self.use_outlier_filter and self.prev_x is not None:
-            # Проверяем левый глаз как основной (можно проверять оба, но для скорости используем левый)
             if self._is_outlier(left_x, left_y, self.prev_x, self.prev_y):
-                # Замена выброса: используем предсказание Калмана или предыдущее значение
                 if self.use_kalman:
                     left_x, left_y = self.kalman_left.update(0, 0)
                     right_x, right_y = self.kalman_right.update(0, 0)
                 else:
                     left_x, left_y = self.prev_x, self.prev_y
-                    right_x, right_y = self.prev_x, self.prev_y  # приблизительно
+                    right_x, right_y = self.prev_x, self.prev_y
 
         # 2. Медианный фильтр (дрожание)
         if self.use_median_filter:
@@ -399,7 +556,7 @@ class EyeTracker:
             left_d = self._apply_median_filter(self.left_d_buffer, left_d)
             right_d = self._apply_median_filter(self.right_d_buffer, right_d)
 
-        # 3. Фильтр Калмана (если включён и не было выброса, но сейчас применяем всегда)
+        # 3. Фильтр Калмана
         if self.use_kalman:
             left_x, left_y = self.kalman_left.update(left_x, left_y)
             right_x, right_y = self.kalman_right.update(right_x, right_y)
@@ -421,7 +578,7 @@ class EyeTracker:
         right_y = int(self.smoothed_right['y'])
         right_d = self.smoothed_right['diameter']
 
-        # 5. Расчёт скорости (используем левый глаз)
+        # 5. Расчёт скорости
         speed = self._calculate_speed(left_x, left_y, current_time)
         self.prev_x, self.prev_y, self.prev_time = left_x, left_y, current_time
 
@@ -436,7 +593,7 @@ class EyeTracker:
             'x': right_x,
             'y': right_y,
             'diameter': right_d,
-            'speed': speed   # можно использовать отдельную скорость для правого глаза, но для простоты оставим общую
+            'speed': speed
         })
 
         # 7. Сохранение в историю
@@ -450,42 +607,45 @@ class EyeTracker:
     def _process_frame(self, result, output_image, timestamp_ms):
         """Обработка кадра (callback для LIVE_STREAM)"""
         current_time = timestamp_ms / 1000.0
-        rel_time = current_time - self.start_time
-        
+
         if not result.face_landmarks or not self.tracker_enabled:
-            
             # При потере трекинга используем предсказание Калмана
             if self.use_kalman and hasattr(self, 'last_detection_time'):
                 time_since_detection = current_time - max(
                     self.last_detection_time.get('left', 0),
                     self.last_detection_time.get('right', 0)
                 )
-                
+
                 if time_since_detection < self.max_prediction_time:
                     left_x, left_y = self.kalman_left.update(0, 0)
                     right_x, right_y = self.kalman_right.update(0, 0)
-                    
+
                     self.left_eye['x'] = left_x
                     self.left_eye['y'] = left_y
                     self.right_eye['x'] = right_x
                     self.right_eye['y'] = right_y
             return
-        
-        
+
         face_landmarks = result.face_landmarks[0]
-        img_w, img_h = output_image.width, output_image.height
-        
-        # Получаем сырые данные для обоих глаз
-        left_x, left_y, left_d = self._get_eye_data(face_landmarks, img_w, img_h, 'left')
-        right_x, right_y, right_d = self._get_eye_data(face_landmarks, img_w, img_h, 'right')
-        
-        # Применяем все фильтры через единый метод
+        # Получаем изображение в формате numpy (RGB)
+        frame_rgb = output_image.numpy_view()
+
+        # Получаем данные для глаз
+        left_x, left_y, left_d = self._get_eye_data(face_landmarks, frame_rgb, 'left')
+        right_x, right_y, right_d = self._get_eye_data(face_landmarks, frame_rgb, 'right')
+
+        # Обновляем время последней успешной детекции для Калмана
+        if self.use_kalman:
+            self.last_detection_time['left'] = current_time
+            self.last_detection_time['right'] = current_time
+
+        # Применяем все фильтры
         self.filter_measurements(left_x, left_y, left_d,
                                  right_x, right_y, right_d,
                                  current_time)
     
     def draw_eyes(self, frame):
-        """Отрисовка глаз на кадре - гарантированно рисует оба глаза"""
+        """Отрисовка глаз на кадре"""
         if self.tracker_enabled:
             # Левый глаз
             if self.left_eye['x'] != 0 and self.left_eye['y'] != 0:
@@ -499,7 +659,7 @@ class EyeTracker:
             else:
                 cv2.putText(frame, "L: not found", (50, 100),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            
+
             # Правый глаз
             if self.right_eye['x'] != 0 and self.right_eye['y'] != 0:
                 color = COLORS['right_eye']
@@ -512,26 +672,26 @@ class EyeTracker:
             else:
                 cv2.putText(frame, "R: not found", (50, 120),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        
+
         # Статус трекера
         status = "TRACKING ON" if self.tracker_enabled else "TRACKING OFF"
         color = (0, 255, 0) if self.tracker_enabled else (0, 0, 255)
         cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
+
         return frame
     
     def process_frame(self, frame):
         """Обработка одного кадра для реального времени"""
         if not self.is_running or not self.cap:
             return frame
-        
+
         if self.tracker_enabled:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            
+
             frame_timestamp_ms = int(time.time() * 1000)
             self.landmarker.detect_async(mp_image, frame_timestamp_ms)
-        
+
         frame = self.draw_eyes(frame)
-        
+
         return frame
