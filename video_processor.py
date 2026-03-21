@@ -151,9 +151,9 @@ class VideoProcessor:
             if detection_result.face_landmarks:
                 face_landmarks = detection_result.face_landmarks[0]
 
-                # Получаем сырые данные глаз
-                left_x, left_y, left_d = self._get_eye_data(face_landmarks, width, height, 'left')
-                right_x, right_y, right_d = self._get_eye_data(face_landmarks, width, height, 'right')
+                # ИЗМЕНЕНО: используем встроенный метод EyeTracker._get_eye_data для Starburst
+                left_x, left_y, left_d = self.tracker._get_eye_data(face_landmarks, rgb_frame, 'left')
+                right_x, right_y, right_d = self.tracker._get_eye_data(face_landmarks, rgb_frame, 'right')
 
                 current_time = frame_count / fps
 
@@ -202,24 +202,7 @@ class VideoProcessor:
         except Exception as e:
             print(f"Ошибка в callback: {e}")
 
-    def _get_eye_data(self, face_landmarks, img_w, img_h, eye_type):
-        """Получает сырые данные для конкретного глаза"""
-        from utils import LEFT_EYE, RIGHT_EYE, calculate_distance
-
-        if eye_type == 'left':
-            indices = LEFT_EYE
-        else:
-            indices = RIGHT_EYE
-
-        center = face_landmarks[indices['center']]
-        p_right = face_landmarks[indices['right']]
-        p_left = face_landmarks[indices['left']]
-
-        x = int(center.x * img_w)
-        y = int(center.y * img_h)
-        diameter = calculate_distance(p_right, p_left, img_w, img_h)
-
-        return x, y, diameter
+    # ИЗМЕНЕНО: метод _get_eye_data удалён, т.к. используется из трекера
 
     def _draw_eyes_on_frame(self, frame, face_landmarks, width, height):
         """Рисует глаза на кадре, используя отфильтрованные координаты из трекера"""
@@ -452,8 +435,6 @@ class VideoPlayerWindow:
         self.smoothing_value = tk.Label(smoothing_frame, text=f"{self.smoothing_var.get():.1f}", width=4)
         self.smoothing_value.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(settings_frame, text="выше = плавнее", font=("Arial", 8), fg="gray").pack(anchor="w", padx=10)
-
         # ФИЛЬТР РЕЗКИХ СКАЧКОВ
         jump_frame = tk.LabelFrame(settings_frame, text="Фильтр резких скачков",
                                    font=("Arial", 10, "bold"))
@@ -488,8 +469,6 @@ class VideoPlayerWindow:
         self.jump_limit_value = tk.Label(jump_scale_frame, text=f"{self.jump_limit_var.get():.0f}", width=4)
         self.jump_limit_value.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(jump_frame, text="меньше = строже", font=("Arial", 8), fg="gray").pack(anchor="w")
-
         # ФИЛЬТР ДРОЖАНИЯ
         shake_frame = tk.LabelFrame(settings_frame, text="Фильтр дрожания",
                                     font=("Arial", 10, "bold"))
@@ -523,8 +502,6 @@ class VideoPlayerWindow:
 
         self.shake_strength_value = tk.Label(shake_scale_frame, text=f"{self.shake_strength_var.get()}", width=4)
         self.shake_strength_value.pack(side=tk.LEFT, padx=5)
-
-        tk.Label(shake_frame, text="выше = сильнее", font=("Arial", 8), fg="gray").pack(anchor="w")
 
         info_frame = tk.Frame(main_frame)
         info_frame.pack(fill=tk.X, pady=10)
@@ -666,7 +643,6 @@ class VideoPlayerWindow:
         import mediapipe as mp
 
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.current_frame)
-
         success, frame = self.cap.read()
         if success and self.current_frame < self.total_frames:
             current_time = self.current_frame / self.fps
@@ -680,14 +656,14 @@ class VideoPlayerWindow:
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
                 timestamp_ms = int((self.current_frame / self.fps) * 1000)
-
                 detection_result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if detection_result and detection_result.face_landmarks:
-                    left_x, left_y, left_d = self._get_eye_data(
-                        detection_result.face_landmarks[0], frame.shape[1], frame.shape[0], 'left')
-                    right_x, right_y, right_d = self._get_eye_data(
-                        detection_result.face_landmarks[0], frame.shape[1], frame.shape[0], 'right')
+                    face_landmarks = detection_result.face_landmarks[0]
+
+                    # ИЗМЕНЕНО: используем встроенный метод EyeTracker._get_eye_data для Starburst
+                    left_x, left_y, left_d = self.processor.tracker._get_eye_data(face_landmarks, rgb_frame, 'left')
+                    right_x, right_y, right_d = self.processor.tracker._get_eye_data(face_landmarks, rgb_frame, 'right')
 
                     # Применяем фильтры через трекер
                     self.processor.tracker.filter_measurements(
@@ -713,35 +689,17 @@ class VideoPlayerWindow:
                     self.processor.results['right_eye']['timestamps'].append(current_time)
 
             self._display_frame(frame)
-
             self.timeline_var.set(self.current_frame)
-
             self.current_frame += 1
-
             delay = int(1000 / self.fps)
             self.window.after(delay, self.play_video)
         else:
             self.stop_playback()
 
-    def _get_eye_data(self, face_landmarks, img_w, img_h, eye_type):
-        from utils import LEFT_EYE, RIGHT_EYE, calculate_distance
-
-        if eye_type == 'left':
-            indices = LEFT_EYE
-        else:
-            indices = RIGHT_EYE
-
-        center = face_landmarks[indices['center']]
-        p_right = face_landmarks[indices['right']]
-        p_left = face_landmarks[indices['left']]
-
-        x = int(center.x * img_w)
-        y = int(center.y * img_h)
-        diameter = calculate_distance(p_right, p_left, img_w, img_h)
-
-        return x, y, diameter
+    # ИЗМЕНЕНО: метод _get_eye_data удалён, т.к. используется из трекера
 
     def _draw_eyes_on_frame(self, frame, face_landmarks, width, height):
+        """Рисует глаза на кадре, используя отфильтрованные координаты из трекера"""
         from utils import COLORS
 
         left_x = self.processor.tracker.left_eye['x']
@@ -798,9 +756,6 @@ class VideoPlayerWindow:
         if self.cap and self.playing_video:
             self.current_frame = int(float(value))
 
-    # Методы для расчёта метрик (saccade, fixation, pursuit) остаются без изменений
-    # (они не зависят от фильтрации, поэтому их код не привожу для краткости)
-
     def preview_charts(self):
         if not self.processor or not self.processor.results:
             messagebox.showinfo("Информация", "Нет данных для отображения")
@@ -826,7 +781,6 @@ class VideoPlayerWindow:
             self.save_btn.config(state=tk.DISABLED)
         else:
             messagebox.showerror("Ошибка", "Не удалось сохранить данные")
-
 
     def on_closing(self):
         if self.playing_video:

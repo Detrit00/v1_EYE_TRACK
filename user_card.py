@@ -104,7 +104,7 @@ class UserCardWindow:
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
         
         # === ЛЕВАЯ КОЛОНКА: ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ ===
-        info_frame = tk.LabelFrame(left_frame, text="Информация о пользователе", font=("Arial", 12, "bold"))
+        info_frame = tk.LabelFrame(left_frame, text="Информация о пациенте", font=("Arial", 12, "bold"))
         info_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # ID (только для чтения)
@@ -149,7 +149,7 @@ class UserCardWindow:
         info_frame.rowconfigure(3, weight=1)
         
         # === ПРАВАЯ КОЛОНКА: ВИДЕО ===
-        video_frame = tk.LabelFrame(right_frame, text="Видео пользователя", font=("Arial", 12, "bold"))
+        video_frame = tk.LabelFrame(right_frame, text="Видео пациента", font=("Arial", 12, "bold"))
         video_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
         # Кнопки управления видео
