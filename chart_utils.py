@@ -1,214 +1,123 @@
 # chart_utils.py
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.gridspec import GridSpec
 import math
 import numpy as np
 
-
-# speed_data — список значений скорости (пиксели/секунду) для каждого кадра
-# timestamps — список временных меток (секунды) для каждого кадра.
-# velocity_threshold — порог скорости, выше которого движение считается саккадой (по умолчанию 100)
-def calculate_saccade_metrics(speed_data, timestamps, velocity_threshold=100):
-    """Расчет метрик саккад"""
-    # Саккада определяется как интервал времени, в течение которого скорость
-    #  движения глаза устойчиво превышает заданный порог. Функция выделяет все
-    # такие интервалы и вычисляет:
-    #       - общее количество саккад;
-    #       - среднюю пиковую скорость (максимальная скорость в каждой саккаде);
-    #       - латентность первой саккады (время от начала записи до её начала).
-
-    # Если данных меньше 10, возвращаются нулевые значения (недостаточно для статистики)
+def calculate_saccade_metrics(speed_data, timestamps,
+                              velocity_threshold=100,
+                              min_saccade_duration=0.01):
+    """
+    Расчёт метрик саккад по I‑VT.
+    Саккада – интервал, где speed > velocity_threshold,
+    длительностью не менее min_saccade_duration.
+    """
     if len(speed_data) < 10:
-        return {
-            'saccade_count': 0,
-            'avg_peak_velocity': 0,
-            'avg_latency': 0
-        }
+        return {'saccade_count': 0, 'avg_peak_velocity': 0, 'avg_latency': 0}
 
-    is_saccade = False          # флаг, находимся ли мы внутри саккады
-    saccade_start = 0            # индекс начала текущей саккады
-    saccades = []                # список обнаруженных саккад
+    is_saccade = False
+    saccade_start = 0
+    saccades = []
 
-    # Проходим по всем значениям скорости
     for i, speed in enumerate(speed_data):
-
-        # Если скорость превышает порог и мы ещё не в саккаде – начинаем саккаду
         if not is_saccade and speed > velocity_threshold:
             is_saccade = True
-            saccade_start = i  
-
-        # Если скорость упала ниже порога и мы были в саккаде – завершаем саккаду
+            saccade_start = i
         elif is_saccade and speed <= velocity_threshold:
             is_saccade = False
-
-            # Минимальная длительность саккады – 3 кадра (чтобы отсечь шум)
-            if i - saccade_start > 2:
-
-                # Берём скорости на интервале саккады
+            duration = timestamps[i-1] - timestamps[saccade_start]
+            if duration >= min_saccade_duration:
                 saccade_speeds = speed_data[saccade_start:i]
-                # Вычисляем пиковую скорость (максимум)
                 peak_vel = max(saccade_speeds)
-                # Длительность в секундах (разница временных меток последнего и первого кадра)
-                duration = timestamps[i-1] - timestamps[saccade_start] if timestamps else 0
-                
                 saccades.append({
                     'start_idx': saccade_start,
-                    'end_idx': i,
+                    'end_idx': i-1,
                     'peak_velocity': peak_vel,
                     'duration': duration
                 })
+    # Если последняя саккада доходит до конца
+    if is_saccade:
+        i = len(speed_data) - 1
+        duration = timestamps[i] - timestamps[saccade_start]
+        if duration >= min_saccade_duration:
+            saccade_speeds = speed_data[saccade_start:i+1]
+            peak_vel = max(saccade_speeds)
+            saccades.append({
+                'start_idx': saccade_start,
+                'end_idx': i,
+                'peak_velocity': peak_vel,
+                'duration': duration
+            })
 
     if saccades:
-        # Средняя пиковая скорость по всем саккадам
         avg_peak = sum(s['peak_velocity'] for s in saccades) / len(saccades)
-        
-        # Латентность первой саккады – время начала самой первой саккады
-        first_saccade_latency = timestamps[saccades[0]['start_idx']] if saccades and timestamps else 0
-        
+        first_latency = timestamps[saccades[0]['start_idx']]
         return {
             'saccade_count': len(saccades),
             'avg_peak_velocity': avg_peak,
-            'avg_latency': first_saccade_latency
+            'avg_latency': first_latency
         }
-
-    return {
-        'saccade_count': 0,
-        'avg_peak_velocity': 0,
-        'avg_latency': 0
-    }
+    return {'saccade_count': 0, 'avg_peak_velocity': 0, 'avg_latency': 0}
 
 
+def calculate_fixation_metrics(speed_data, timestamps,
+                               velocity_threshold=100,
+                               min_fixation_duration=0.04):
+    """
+    Расчёт метрик фиксаций по I‑VT.
+    Фиксация – интервал, где speed <= velocity_threshold,
+    длительностью не менее min_fixation_duration.
+    """
+    if len(speed_data) < 10:
+        return {'fixation_count': 0, 'avg_fixation_duration': 0}
 
-# x_data (list[float]): координаты X для каждого кадра
-# y_data (list[float]): координаты Y для каждого кадра
-# timestamps (list[float]): временные метки
-# max_deviation (float): максимально допустимый разброс (дисперсия) для фиксации
-# min_duration (float): минимальная длительность фиксации в секундах
-def calculate_fixation_metrics(x_data, y_data, timestamps,
-                                max_deviation=20, min_duration=0.1):
-    """Расчет метрик фиксаций"""
-    # Фиксация определяется как интервал, в течение которого координаты взгляда
-    # имеют малый разброс (дисперсию). Используется скользящее окно размером 5 кадров.
-    # Для каждого окна вычисляется дисперсия по X и Y, затем общая дисперсия
-    # (евклидова норма). Если дисперсия ниже порога и держится несколько окон,
-    # фиксируется фиксация.
+    is_fixation = False
+    fixation_start = 0
+    fixations = []
 
-    # Если данных меньше 5, возвращаются нулевые значения (недостаточно для статистики)
-    if len(x_data) < 5:
-        return {
-            'fixation_count': 0,
-            'avg_fixation_duration': 0
-        }
-
-    fixations = []            # список обнаруженных фиксаций
-    in_fixation = False       # флаг, находимся ли мы внутри фиксации
-    fixation_start = 0         # индекс начала текущей фиксации
-    window_size = 5            # размер окна для скользящего анализа
-
-    # Проходим по данным с окном размером window_size
-    for i in range(len(x_data) - window_size):
-        # Берём окно данных по X и Y
-        window_x = x_data[i:i+window_size]
-        window_y = y_data[i:i+window_size]
-
-        # Вычисляем дисперсию в окне (мера разброса)
-        var_x = np.var(window_x) if len(window_x) > 1 else 0
-        var_y = np.var(window_y) if len(window_y) > 1 else 0
-
-        # Объединяем дисперсии: корень из суммы квадратов (евклидова норма)
-        dispersion = math.sqrt(var_x**2 + var_y**2)
-
-        # Если дисперсия меньше порога и мы не в фиксации – начинаем фиксацию
-        if dispersion < max_deviation and not in_fixation:
-            in_fixation = True
+    for i, speed in enumerate(speed_data):
+        if not is_fixation and speed <= velocity_threshold:
+            is_fixation = True
             fixation_start = i
-
-        # Если дисперсия превысила порог и мы были в фиксации – завершаем фиксацию
-        elif dispersion >= max_deviation and in_fixation:
-            in_fixation = False
-
-            # Проверяем, что фиксация длилась хотя бы 2 кадра
-            if i - fixation_start > 1:
-                # Вычисляем длительность в секундах (последний кадр фиксации – i-1)
-                duration = timestamps[i-1] - timestamps[fixation_start]
-
-                # Если длительность не меньше минимальной – сохраняем фиксацию
-                if duration >= min_duration:
-                    fixations.append({
-                        'start': fixation_start,
-                        'end': i-1,
-                        'duration': duration
-                    })
+        elif is_fixation and speed > velocity_threshold:
+            is_fixation = False
+            duration = timestamps[i-1] - timestamps[fixation_start]
+            if duration >= min_fixation_duration:
+                fixations.append({
+                    'start_idx': fixation_start,
+                    'end_idx': i-1,
+                    'duration': duration
+                })
+    # Если последняя фиксация доходит до конца
+    if is_fixation:
+        i = len(speed_data) - 1
+        duration = timestamps[i] - timestamps[fixation_start]
+        if duration >= min_fixation_duration:
+            fixations.append({
+                'start_idx': fixation_start,
+                'end_idx': i,
+                'duration': duration
+            })
 
     if fixations:
-        # Средняя длительность всех фиксаций
         avg_duration = sum(f['duration'] for f in fixations) / len(fixations)
         return {
             'fixation_count': len(fixations),
             'avg_fixation_duration': avg_duration
         }
-    
-    # Если фиксации не обнаружены, возвращаем нули
-    return {
-        'fixation_count': 0,
-        'avg_fixation_duration': 0
-    }
+    return {'fixation_count': 0, 'avg_fixation_duration': 0}
 
 
-
-# x_data (list[float]): координаты X для каждого кадра (можно использовать любую ось)
-# timestamps (list[float]): временные метки
-# target_speed (float): предполагаемая скорость движения цели (пиксели/секунду)
-def calculate_smooth_pursuit_gain(x_data, timestamps, target_speed=100):
-    """Расчет усиления следящих движений"""
-
-    # Усиление определяется как отношение средней скорости движения глаза
-    # к скорости движения цели. В реальных экспериментах скорость цели известна,
-    # здесь используется приблизительное значение target_speed.
-
-    if len(x_data) < 10:
-        return 0
-
-    eye_speeds = [] # список мгновенных скоростей глаза по оси X
-
-    # Для каждого интервала между кадрами вычисляем скорость
-    for i in range(1, len(x_data)):
-        dx = x_data[i] - x_data[i-1]                     # перемещение по X
-        dt = timestamps[i] - timestamps[i-1]             # временной интервал
-        # Защита от нулевого или отрицательного dt (если метки одинаковы, берём 0.033 с)
-        if dt <= 0:
-            dt = 0.033
-        speed = abs(dx) / dt                              # модуль скорости
-        eye_speeds.append(speed)
-
-    if not eye_speeds:
-        return 0
-
-    # Средняя скорость глаза за всю запись
-    avg_eye_speed = sum(eye_speeds) / len(eye_speeds)
-
-    # Вычисляем gain = скорость глаза / скорость цели
-    if target_speed > 0:
-        gain = avg_eye_speed / target_speed
-    else:
-        gain = 0
-
-    # Ограничиваем сверху значением 2.0 (чтобы избежать выбросов)
-    return min(gain, 2.0)
-
-
-def show_charts_window(parent, video_title, data, source_message=""):
+def show_charts_window(parent, video_title, data,
+                       source_message="",
+                       velocity_threshold=100,
+                       min_fixation_duration=0.04,
+                       min_saccade_duration=0.01):
     """
-    Отображает окно с графиками и статистикой.
-    parent - родительское окно Tkinter
-    video_title - название видео
-    data - словарь с данными айтрекинга вида:
-           {'left_eye': {'x': [...], 'y': [...], 'diameter': [...], 'speed': [...], 'timestamps': [...]},
-            'right_eye': {...}}
-    source_message - доп. информация (например, "Предпросмотр")
+    Отображает окно с графиками и статистикой, используя переданные параметры.
     """
     charts_window = tk.Toplevel(parent)
     charts_window.title(f"Графики и статистика - {video_title} {source_message}")
@@ -217,7 +126,6 @@ def show_charts_window(parent, video_title, data, source_message=""):
     notebook = ttk.Notebook(charts_window)
     notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-    # Извлекаем данные для левого и правого глаза с защитой от отсутствия ключей
     left_eye = data.get('left_eye', {})
     right_eye = data.get('right_eye', {})
 
@@ -247,7 +155,10 @@ def show_charts_window(parent, video_title, data, source_message=""):
     text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-    text_widget.insert(tk.END, f"Данные айтрекинга для видео: {video_title}\n\n")
+    text_widget.insert(tk.END, f"Данные айтрекинга для видео: {video_title}\n")
+    text_widget.insert(tk.END, f"Параметры классификации: порог скорости = {velocity_threshold:.0f} px/s, "
+                               f"мин. длительность фиксации = {min_fixation_duration*1000:.0f} мс, "
+                               f"мин. длительность саккады = {min_saccade_duration*1000:.0f} мс\n\n")
 
     for eye_name, eye_data in [('left_eye', left_eye), ('right_eye', right_eye)]:
         timestamps = eye_data.get('timestamps', [])
@@ -256,12 +167,19 @@ def show_charts_window(parent, video_title, data, source_message=""):
         diameters = eye_data.get('diameter', [])
         speeds = eye_data.get('speed', [])
 
-        saccade_metrics = calculate_saccade_metrics(speeds, timestamps)
-        fixation_metrics = calculate_fixation_metrics(x_coords, y_coords, timestamps)
-        pursuit_gain = calculate_smooth_pursuit_gain(x_coords, timestamps)
+        saccade_metrics = calculate_saccade_metrics(speeds, timestamps,
+                                                    velocity_threshold,
+                                                    min_saccade_duration)
+        fixation_metrics = calculate_fixation_metrics(speeds, timestamps,
+                                                      velocity_threshold,
+                                                      min_fixation_duration)
 
         text_widget.insert(tk.END, f"\n{'='*50}\n")
-        text_widget.insert(tk.END, f"{eye_name.upper()}\n")
+        if eye_name == 'left_eye':
+            eye_title = 'ЛЕВЫЙ ГЛАЗ'
+        else:
+            eye_title = 'ПРАВЫЙ ГЛАЗ'
+        text_widget.insert(tk.END, f"{eye_title}\n")
         text_widget.insert(tk.END, f"{'='*50}\n\n")
 
         text_widget.insert(tk.END, "ОСНОВНЫЕ ПОКАЗАНИЯ:\n")
@@ -295,10 +213,6 @@ def show_charts_window(parent, video_title, data, source_message=""):
             text_widget.insert(tk.END, f"Средняя продолжительность фиксации: {fixation_metrics['avg_fixation_duration']*1000:.2f} мс\n")
         else:
             text_widget.insert(tk.END, f"Средняя продолжительность фиксации: 0 мс\n")
-
-        text_widget.insert(tk.END, f"\nСЛЕДЯЩИЕ ДВИЖЕНИЯ:\n")
-        text_widget.insert(tk.END, f"{'-'*40}\n")
-        text_widget.insert(tk.END, f"Усиление следящих движений: {pursuit_gain:.2f}\n\n")
 
     text_widget.config(state=tk.DISABLED)
 

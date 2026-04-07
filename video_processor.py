@@ -409,17 +409,39 @@ class VideoPlayerWindow:
         )
         self.timeline.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        settings_frame = tk.LabelFrame(content_frame, text="Настройки",
-                                       font=("Arial", 11, "bold"), width=300)
+        # ------------------------------------------------------------
+        # Правая панель настроек с прокруткой
+        # ------------------------------------------------------------
+        settings_frame = tk.LabelFrame(content_frame, text="Настройки", font=("Arial", 11, "bold"), width=300)
         settings_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
-        settings_frame.pack_propagate(False)
+        #settings_frame.pack_propagate(False)
 
-        # СГЛАЖИВАНИЕ ТРАЕКТОРИИ
-        tk.Label(settings_frame, text="Сглаживание траектории:", font=("Arial", 10, "bold")).pack(pady=(10, 5))
+        canvas = tk.Canvas(settings_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(settings_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
 
-        smoothing_frame = tk.Frame(settings_frame)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        scrollable_frame = tk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def configure_scroll_region(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        scrollable_frame.bind("<Configure>", configure_scroll_region)
+
+        def configure_canvas_width(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+        canvas.bind("<Configure>", configure_canvas_width)
+
+        # ------------------------------------------------------------
+        # Блоки настроек (все добавляются в scrollable_frame)
+        # ------------------------------------------------------------
+
+        # 1. Сглаживание траектории
+        tk.Label(scrollable_frame, text="Сглаживание траектории:", font=("Arial", 10, "bold")).pack(pady=(10, 5))
+        smoothing_frame = tk.Frame(scrollable_frame)
         smoothing_frame.pack(fill=tk.X, pady=2)
-
         self.smoothing_var = tk.DoubleVar(value=0.6)
         smoothing_scale = tk.Scale(
             smoothing_frame,
@@ -431,15 +453,12 @@ class VideoPlayerWindow:
             command=self.on_smoothing_change
         )
         smoothing_scale.pack(side=tk.LEFT)
-
         self.smoothing_value = tk.Label(smoothing_frame, text=f"{self.smoothing_var.get():.1f}", width=4)
         self.smoothing_value.pack(side=tk.LEFT, padx=5)
 
-        # ФИЛЬТР РЕЗКИХ СКАЧКОВ
-        jump_frame = tk.LabelFrame(settings_frame, text="Фильтр резких скачков",
-                                   font=("Arial", 10, "bold"))
+        # 2. Фильтр резких скачков
+        jump_frame = tk.LabelFrame(scrollable_frame, text="Фильтр резких скачков", font=("Arial", 10, "bold"))
         jump_frame.pack(fill=tk.X, pady=10, padx=5)
-
         self.use_jump_filter_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             jump_frame,
@@ -448,12 +467,9 @@ class VideoPlayerWindow:
             font=("Arial", 9),
             command=self.on_jump_filter_change
         ).pack(anchor="w", pady=2)
-
         tk.Label(jump_frame, text="Макс. перемещение (пиксели):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
-
         jump_scale_frame = tk.Frame(jump_frame)
         jump_scale_frame.pack(fill=tk.X, pady=2)
-
         self.jump_limit_var = tk.DoubleVar(value=100)
         jump_scale = tk.Scale(
             jump_scale_frame,
@@ -465,15 +481,12 @@ class VideoPlayerWindow:
             command=self.on_jump_limit_change
         )
         jump_scale.pack(side=tk.LEFT)
-
         self.jump_limit_value = tk.Label(jump_scale_frame, text=f"{self.jump_limit_var.get():.0f}", width=4)
         self.jump_limit_value.pack(side=tk.LEFT, padx=5)
 
-        # ФИЛЬТР ДРОЖАНИЯ
-        shake_frame = tk.LabelFrame(settings_frame, text="Фильтр дрожания",
-                                    font=("Arial", 10, "bold"))
+        # 3. Фильтр дрожания
+        shake_frame = tk.LabelFrame(scrollable_frame, text="Фильтр дрожания", font=("Arial", 10, "bold"))
         shake_frame.pack(fill=tk.X, pady=10, padx=5)
-
         self.use_shake_filter_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
             shake_frame,
@@ -482,12 +495,9 @@ class VideoPlayerWindow:
             font=("Arial", 9),
             command=self.on_shake_filter_change
         ).pack(anchor="w", pady=2)
-
         tk.Label(shake_frame, text="Сила сглаживания:", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
-
         shake_scale_frame = tk.Frame(shake_frame)
         shake_scale_frame.pack(fill=tk.X, pady=2)
-
         self.shake_strength_var = tk.IntVar(value=3)
         shake_scale = tk.Scale(
             shake_scale_frame,
@@ -499,13 +509,107 @@ class VideoPlayerWindow:
             command=self.on_shake_strength_change
         )
         shake_scale.pack(side=tk.LEFT)
-
         self.shake_strength_value = tk.Label(shake_scale_frame, text=f"{self.shake_strength_var.get()}", width=4)
         self.shake_strength_value.pack(side=tk.LEFT, padx=5)
 
+        # 4. Детекция глаз
+        detect_frame = tk.LabelFrame(scrollable_frame, text="Детекция глаз", font=("Arial", 10, "bold"))
+        detect_frame.pack(fill=tk.X, pady=10, padx=5)
+        tk.Label(detect_frame, text="Надёжность обнаружения лица:", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
+        detect_scale_frame = tk.Frame(detect_frame)
+        detect_scale_frame.pack(fill=tk.X, pady=2)
+        self.detection_conf_var = tk.DoubleVar(value=0.5)
+        detect_scale = tk.Scale(
+            detect_scale_frame,
+            from_=0.5, to=0.9,
+            resolution=0.05,
+            orient=tk.HORIZONTAL,
+            length=180,
+            variable=self.detection_conf_var,
+            command=self.on_detection_conf_change
+        )
+        detect_scale.pack(side=tk.LEFT)
+        self.detection_conf_value = tk.Label(detect_scale_frame, text=f"{self.detection_conf_var.get():.2f}", width=4)
+        self.detection_conf_value.pack(side=tk.LEFT, padx=5)
+
+        # 5. Локализация зрачка (Starburst)
+        local_frame = tk.LabelFrame(scrollable_frame, text="Локализация зрачка", font=("Arial", 10, "bold"))
+        local_frame.pack(fill=tk.X, pady=10, padx=5)
+        tk.Label(local_frame, text="Чувствительность к границе:", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
+        grad_scale_frame = tk.Frame(local_frame)
+        grad_scale_frame.pack(fill=tk.X, pady=2)
+        self.gradient_thresh_var = tk.IntVar(value=15)
+        grad_scale = tk.Scale(
+            grad_scale_frame,
+            from_=10, to=30,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            length=180,
+            variable=self.gradient_thresh_var,
+            command=self.on_gradient_thresh_change
+        )
+        grad_scale.pack(side=tk.LEFT)
+        self.gradient_thresh_value = tk.Label(grad_scale_frame, text=f"{self.gradient_thresh_var.get()}", width=4)
+        self.gradient_thresh_value.pack(side=tk.LEFT, padx=5)
+
+        # 6. Классификация движений (I-VT)
+        class_frame = tk.LabelFrame(scrollable_frame, text="Классификация движений", font=("Arial", 10, "bold"))
+        class_frame.pack(fill=tk.X, pady=10, padx=5)
+
+        tk.Label(class_frame, text="Порог скорости (пикс/сек):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
+        vel_scale_frame = tk.Frame(class_frame)
+        vel_scale_frame.pack(fill=tk.X, pady=2)
+        self.velocity_thresh_var = tk.IntVar(value=100)
+        vel_scale = tk.Scale(
+            vel_scale_frame,
+            from_=50, to=300,
+            resolution=10,
+            orient=tk.HORIZONTAL,
+            length=180,
+            variable=self.velocity_thresh_var,
+            command=self.on_velocity_thresh_change
+        )
+        vel_scale.pack(side=tk.LEFT)
+        self.velocity_thresh_value = tk.Label(vel_scale_frame, text=f"{self.velocity_thresh_var.get()}", width=4)
+        self.velocity_thresh_value.pack(side=tk.LEFT, padx=5)
+
+        tk.Label(class_frame, text="Мин. длительность фиксации (мс):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
+        fix_scale_frame = tk.Frame(class_frame)
+        fix_scale_frame.pack(fill=tk.X, pady=2)
+        self.fixation_dur_var = tk.IntVar(value=40)
+        fix_scale = tk.Scale(
+            fix_scale_frame,
+            from_=40, to=200,
+            resolution=10,
+            orient=tk.HORIZONTAL,
+            length=180,
+            variable=self.fixation_dur_var,
+            command=self.on_fixation_dur_change
+        )
+        fix_scale.pack(side=tk.LEFT)
+        self.fixation_dur_value = tk.Label(fix_scale_frame, text=f"{self.fixation_dur_var.get()}", width=4)
+        self.fixation_dur_value.pack(side=tk.LEFT, padx=5)
+
+        tk.Label(class_frame, text="Мин. длительность саккады (мс):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
+        sacc_scale_frame = tk.Frame(class_frame)
+        sacc_scale_frame.pack(fill=tk.X, pady=2)
+        self.saccade_dur_var = tk.IntVar(value=10)
+        sacc_scale = tk.Scale(
+            sacc_scale_frame,
+            from_=10, to=50,
+            resolution=5,
+            orient=tk.HORIZONTAL,
+            length=180,
+            variable=self.saccade_dur_var,
+            command=self.on_saccade_dur_change
+        )
+        sacc_scale.pack(side=tk.LEFT)
+        self.saccade_dur_value = tk.Label(sacc_scale_frame, text=f"{self.saccade_dur_var.get()}", width=4)
+        self.saccade_dur_value.pack(side=tk.LEFT, padx=5)
+
+        # Информационная панель
         info_frame = tk.Frame(main_frame)
         info_frame.pack(fill=tk.X, pady=10)
-
         self.info_label = tk.Label(
             info_frame,
             font=("Arial", 10),
@@ -513,7 +617,63 @@ class VideoPlayerWindow:
         )
         self.info_label.pack()
 
+        # после всех настроек
+        self.window.update_idletasks()
+
+        def configure_scroll_region_later():
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+                print("Scrollregion set to:", bbox)
+            else:
+                print("bbox is None, retrying...")
+                self.window.after(100, configure_scroll_region_later)
+
+        # Запускаем проверку через 50 мс, чтобы дать время на отрисовку
+        self.window.after(50, configure_scroll_region_later)
+
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+
+    ### 28.03
+    def on_detection_conf_change(self, value):
+        """Обновление надёжности обнаружения лица"""
+        val = float(value)
+        self.detection_conf_value.config(text=f"{val:.2f}")
+        if self.processor and self.processor.tracker:
+            self.processor.tracker.min_detection_confidence = val
+            # При необходимости можно перезапустить трекер, но для MediaPipe изменение параметров во время работы может не примениться.
+            # Для простоты оставляем так – при следующем кадре параметр будет использован.
+
+    def on_gradient_thresh_change(self, value):
+        """Обновление порога градиента для Starburst"""
+        val = int(float(value))
+        self.gradient_thresh_value.config(text=f"{val}")
+        if self.processor and self.processor.tracker:
+            self.processor.tracker.starburst.gradient_threshold = val
+
+    def on_velocity_thresh_change(self, value):
+        """Обновление порога скорости (I‑VT)"""
+        val = int(float(value))
+        self.velocity_thresh_value.config(text=f"{val}")
+        if self.processor and self.processor.tracker:
+            self.processor.tracker.velocity_threshold = val
+
+    def on_fixation_dur_change(self, value):
+        """Обновление минимальной длительности фиксации (мс → сек)"""
+        val = int(float(value))
+        self.fixation_dur_value.config(text=f"{val}")
+        if self.processor and self.processor.tracker:
+            self.processor.tracker.min_fixation_duration = val / 1000.0
+
+    def on_saccade_dur_change(self, value):
+        """Обновление минимальной длительности саккады (мс → сек)"""
+        val = int(float(value))
+        self.saccade_dur_value.config(text=f"{val}")
+        if self.processor and self.processor.tracker:
+            self.processor.tracker.min_saccade_duration = val / 1000.0
+
+    ### 28.03
 
     def on_jump_limit_change(self, value):
         self.jump_limit_value.config(text=f"{float(value):.0f}")
@@ -586,6 +746,13 @@ class VideoPlayerWindow:
         if not self.processor.tracker.download_model():
             messagebox.showerror("Ошибка", "Не удалось загрузить модель")
             return
+        
+        # Установка новых параметров
+        self.processor.tracker.min_detection_confidence = self.detection_conf_var.get()
+        self.processor.tracker.starburst.gradient_threshold = self.gradient_thresh_var.get()
+        self.processor.tracker.velocity_threshold = self.velocity_thresh_var.get()
+        self.processor.tracker.min_fixation_duration = self.fixation_dur_var.get() / 1000.0
+        self.processor.tracker.min_saccade_duration = self.saccade_dur_var.get() / 1000.0
 
         import mediapipe as mp
         from mediapipe.tasks import python
@@ -756,6 +923,7 @@ class VideoPlayerWindow:
         if self.cap and self.playing_video:
             self.current_frame = int(float(value))
 
+    ##
     def preview_charts(self):
         if not self.processor or not self.processor.results:
             messagebox.showinfo("Информация", "Нет данных для отображения")
@@ -765,7 +933,18 @@ class VideoPlayerWindow:
             messagebox.showinfo("Информация", "Нет данных для отображения")
             return
 
-        show_charts_window(self.window, self.video_title, self.processor.results, "Предпросмотр")
+        # Получаем параметры классификации из трекера
+        tracker = self.processor.tracker
+        show_charts_window(
+            self.window,
+            self.video_title,
+            self.processor.results,
+            source_message="Предпросмотр",
+            velocity_threshold=tracker.velocity_threshold,
+            min_fixation_duration=tracker.min_fixation_duration,
+            min_saccade_duration=tracker.min_saccade_duration
+        )
+    ##
 
     def save_to_database(self):
         if not self.processor or not self.processor.results:
