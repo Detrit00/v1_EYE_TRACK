@@ -579,6 +579,9 @@ class MathSpecialistWindow:
             if not success:
                 continue
             frame = cv2.flip(frame, 1)
+            # Исправляем цветовое пространство камеры (работает для RGB и BGR)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
             frame = self.tracker.process_frame(frame)
 
