@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 import threading
 import time
+import math
+import mediapipe as mp
 from utils import center_window
 from eye_tracker import EyeTracker
 
@@ -22,15 +24,19 @@ class MathSpecialistWindow:
         center_window(self.window, 1200, 800)
         self.window.grab_set()
         self.window.focus_set()
+        self.window.report_callback_exception = self._handle_tk_callback_exception
 
         # Флаги состояния
         self.camera_running = False
         self.camera_thread = None
         self.test_camera = None
+        self.show_mediapipe = False
+        self.show_starburst = False
 
         # Загружаем сохраненные настройки
         self.settings_file = "tracker_settings.json"
         self.settings = self.load_settings()
+        self.current_preset = self.detect_preset()
 
         # Применяем настройки к трекеру
         if hasattr(self.tracker, 'update_all_settings'):
@@ -98,6 +104,75 @@ class MathSpecialistWindow:
             messagebox.showerror("Ошибка", f"Не удалось сохранить настройки: {e}")
             return False
 
+    def get_preset(self, preset_name):
+        presets = {
+            'fast': {
+                'min_detection_confidence': 0.3,
+                'min_tracking_confidence': 0.3,
+                'min_presence_confidence': 0.3,
+                'smoothing_factor': 0.5,
+                'use_kalman': False,
+                'use_median_filter': False,
+                'velocity_threshold': 150,
+                'starburst_num_rays': 8,
+                'starburst_ray_length': 25,
+                'starburst_gradient_threshold': 12,
+                'starburst_min_ellipse_points': 4,
+            },
+            'balanced': {
+                'min_detection_confidence': 0.5,
+                'min_tracking_confidence': 0.5,
+                'min_presence_confidence': 0.5,
+                'smoothing_factor': 0.7,
+                'use_kalman': True,
+                'use_median_filter': True,
+                'velocity_threshold': 100,
+                'starburst_num_rays': 12,
+                'starburst_ray_length': 30,
+                'starburst_gradient_threshold': 15,
+                'starburst_min_ellipse_points': 6,
+            },
+            'accurate': {
+                'min_detection_confidence': 0.7,
+                'min_tracking_confidence': 0.7,
+                'min_presence_confidence': 0.7,
+                'smoothing_factor': 0.85,
+                'use_kalman': True,
+                'use_median_filter': True,
+                'velocity_threshold': 80,
+                'starburst_num_rays': 16,
+                'starburst_ray_length': 40,
+                'starburst_gradient_threshold': 20,
+                'starburst_min_ellipse_points': 8,
+            },
+        }
+        return presets.get(preset_name, {})
+
+    def detect_preset(self):
+        presets = {
+            'fast': self.get_preset('fast'),
+            'balanced': self.get_preset('balanced'),
+            'accurate': self.get_preset('accurate'),
+        }
+        for name, preset in presets.items():
+            if all(self.settings.get(k) == v for k, v in preset.items()):
+                return name
+        return 'custom'
+
+    def apply_preset(self, preset_name):
+        preset = self.get_preset(preset_name)
+        if not preset:
+            return
+        for key, value in preset.items():
+            self.settings[key] = value
+        self.use_grad_dir_var.set(self.settings['use_gradient_direction'])
+        self.use_outlier_var.set(self.settings['use_outlier_filter'])
+        self.use_median_var.set(self.settings['use_median_filter'])
+        self.use_kalman_var.set(self.settings['use_kalman'])
+        self.current_preset = preset_name
+        self.save_settings()
+        self.refresh_ui()
+
     def create_widgets(self):
         main_frame = tk.Frame(self.window)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -139,6 +214,66 @@ class MathSpecialistWindow:
         )
         self.start_camera_btn.pack(side=tk.LEFT, padx=2)
 
+        # Кнопки визуализации
+        visualization_frame = tk.Frame(left_panel, height=40)
+        visualization_frame.pack(fill=tk.X, pady=2)
+        visualization_frame.pack_propagate(False)
+
+        tk.Button(
+            visualization_frame,
+            text="MediaPipe",
+            font=("Arial", 9),
+            bg="#3498db",
+            fg="white",
+            width=12,
+            command=self.toggle_mediapipe_view
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(
+            visualization_frame,
+            text="Starburst",
+            font=("Arial", 9),
+            bg="#9b59b6",
+            fg="white",
+            width=12,
+            command=self.toggle_starburst_view
+        ).pack(side=tk.LEFT, padx=2)
+
+        # Быстрые пресеты
+        preset_frame = tk.Frame(left_panel, height=40)
+        preset_frame.pack(fill=tk.X, pady=2)
+        preset_frame.pack_propagate(False)
+
+        tk.Button(
+            preset_frame,
+            text="Быстро",
+            font=("Arial", 9),
+            bg="#bdc3c7",
+            fg="black",
+            width=12,
+            command=lambda: self.apply_preset('fast')
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(
+            preset_frame,
+            text="Баланс",
+            font=("Arial", 9),
+            bg="#95a5a6",
+            fg="white",
+            width=12,
+            command=lambda: self.apply_preset('balanced')
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Button(
+            preset_frame,
+            text="Точно",
+            font=("Arial", 9),
+            bg="#7f8c8d",
+            fg="white",
+            width=12,
+            command=lambda: self.apply_preset('accurate')
+        ).pack(side=tk.LEFT, padx=2)
+
         # Правая панель - настройки (без фиксации размера)
         right_panel = tk.Frame(main_frame, width=500)
         right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
@@ -153,6 +288,17 @@ class MathSpecialistWindow:
             height=1
         )
         settings_title.pack(fill=tk.X)
+
+        self.settings_summary_label = tk.Label(
+            right_panel,
+            text="",
+            font=("Arial", 9),
+            bg="#f8f9fa",
+            fg="#2c3e50",
+            justify=tk.LEFT,
+            anchor="w"
+        )
+        self.settings_summary_label.pack(fill=tk.X, padx=10, pady=(4, 8))
 
         # Контейнер с прокруткой
         canvas = tk.Canvas(right_panel, highlightthickness=0, bg="#f8f9fa")
@@ -311,7 +457,14 @@ class MathSpecialistWindow:
 
         # Принудительное обновление прокрутки после отрисовки
         self.window.update_idletasks()
-        self.window.after(50, lambda: canvas.configure(scrollregion=canvas.bbox("all")))
+        def safe_update_scrollregion():
+            try:
+                if self.window and self.window.winfo_exists():
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+            except tk.TclError:
+                pass
+        self.window.after(50, safe_update_scrollregion)
+        self.update_settings_label()
 
     def create_slider(self, parent, label, key, from_, to_, resolution):
         frame = tk.Frame(parent, bg="#f8f9fa")
@@ -342,20 +495,40 @@ class MathSpecialistWindow:
         def update_value(*args):
             value_label.config(text=f"{value_var.get():.3f}")
             self.settings[key] = value_var.get()
+            self.current_preset = 'custom'
+            self.update_settings_label()
 
         value_var.trace_add("write", update_value)
 
     def update_grad_dir(self):
         self.settings['use_gradient_direction'] = self.use_grad_dir_var.get()
+        self.current_preset = 'custom'
+        self.update_settings_label()
 
     def update_outlier_filter(self):
         self.settings['use_outlier_filter'] = self.use_outlier_var.get()
+        self.current_preset = 'custom'
+        self.update_settings_label()
 
     def update_median_filter(self):
         self.settings['use_median_filter'] = self.use_median_var.get()
+        self.current_preset = 'custom'
+        self.update_settings_label()
 
     def update_kalman(self):
         self.settings['use_kalman'] = self.use_kalman_var.get()
+        self.current_preset = 'custom'
+        self.update_settings_label()
+
+    def update_settings_label(self):
+        preset_titles = {
+            'fast': 'Быстрый',
+            'balanced': 'Сбалансированный',
+            'accurate': 'Точный',
+            'custom': 'Пользовательский',
+        }
+        preset_text = preset_titles.get(self.current_preset, 'Пользовательский')
+        self.settings_summary_label.config(text=f"Текущий пресет: {preset_text}")
 
     def toggle_camera(self):
         if not self.camera_running:
@@ -374,7 +547,16 @@ class MathSpecialistWindow:
             self.start_camera_btn.config(text="Остановить камеру", bg="#e74c3c")
 
             if not self.tracker.is_running:
-                self.tracker.start()
+                if not self.tracker.download_model():
+                    messagebox.showerror("Ошибка", "Не удалось загрузить модель трекера")
+                    self.camera_running = False
+                    self.start_camera_btn.config(text="Запустить камеру", bg="#27ae60")
+                    return
+                if not self.tracker.start(use_internal_camera=False):
+                    messagebox.showerror("Ошибка", "Не удалось запустить трекер")
+                    self.camera_running = False
+                    self.start_camera_btn.config(text="Запустить камеру", bg="#27ae60")
+                    return
 
             self.camera_thread = threading.Thread(target=self.camera_loop)
             self.camera_thread.daemon = True
@@ -397,7 +579,14 @@ class MathSpecialistWindow:
             if not success:
                 continue
             frame = cv2.flip(frame, 1)
+
             frame = self.tracker.process_frame(frame)
+
+            if self.show_mediapipe:
+                frame = self.draw_mediapipe_visualization(frame)
+            elif self.show_starburst:
+                frame = self.draw_starburst_visualization(frame)
+
             display_frame = cv2.resize(frame, (640, 480))
             self.display_frame(display_frame)
             time.sleep(0.03)
@@ -405,10 +594,81 @@ class MathSpecialistWindow:
     def display_frame(self, frame):
         if frame is None:
             return
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = tk.PhotoImage(data=cv2.imencode('.ppm', frame_rgb)[1].tobytes())
-        self.video_frame.config(image=img)
-        self.video_frame.image = img
+        if not getattr(self, 'window', None) or not self.window.winfo_exists():
+            return
+
+        try:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = tk.PhotoImage(data=cv2.imencode('.ppm', frame_rgb)[1].tobytes())
+        except Exception:
+            return
+
+        def update_image():
+            try:
+                if self.video_frame.winfo_exists():
+                    self.video_frame.config(image=img)
+                    self.video_frame.image = img
+            except tk.TclError:
+                pass
+
+        try:
+            self.window.after(0, update_image)
+        except tk.TclError:
+            pass
+
+    def toggle_mediapipe_view(self):
+        """Переключить режим отображения MediaPipe landmarks"""
+        self.show_mediapipe = not self.show_mediapipe
+        self.show_starburst = False
+
+    def toggle_starburst_view(self):
+        """Переключить режим отображения Starburst алгоритма"""
+        self.show_starburst = not self.show_starburst
+        self.show_mediapipe = False
+
+    def draw_mediapipe_visualization(self, frame):
+        """Рисовать MediaPipe ключевые точки лица"""
+        h, w, _ = frame.shape
+
+        if self.tracker.latest_face_landmarks is None:
+            return frame
+
+        for landmark in self.tracker.latest_face_landmarks:
+            if landmark.x is None or landmark.y is None:
+                continue
+            px = int(landmark.x * w)
+            py = int(landmark.y * h)
+            cv2.circle(frame, (px, py), 2, (0, 255, 0), -1)
+
+        return frame
+
+    def draw_starburst_visualization(self, frame):
+        """Рисовать Starburst алгоритм поиска зрачка"""
+        h, w, _ = frame.shape
+
+        if self.tracker.left_eye['x'] == 0 or self.tracker.left_eye['y'] == 0:
+            return frame
+
+        center_x = self.tracker.left_eye['x']
+        center_y = self.tracker.left_eye['y']
+        radius = int(self.tracker.left_eye['diameter'] / 2)
+
+        cv2.circle(frame, (center_x, center_y), 3, (0, 255, 0), -1)
+        cv2.circle(frame, (center_x, center_y), radius, (0, 255, 0), 2)
+
+        num_rays = self.tracker.starburst.num_rays
+        ray_length = self.tracker.starburst.ray_length
+        angles = np.linspace(0, 2 * np.pi, num_rays, endpoint=False)
+
+        for angle in angles:
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+            end_x = int(center_x + dx * ray_length)
+            end_y = int(center_y + dy * ray_length)
+            cv2.line(frame, (center_x, center_y), (end_x, end_y), (255, 0, 0), 1)
+            cv2.circle(frame, (end_x, end_y), 2, (255, 0, 0), -1)
+
+        return frame
 
     def apply_settings(self):
         if self.settings['median_filter_size'] % 2 == 0:
@@ -450,6 +710,7 @@ class MathSpecialistWindow:
                     self.use_outlier_var.set(self.settings['use_outlier_filter'])
                     self.use_median_var.set(self.settings['use_median_filter'])
                     self.use_kalman_var.set(self.settings['use_kalman'])
+                    self.current_preset = self.detect_preset()
                     self.refresh_ui()
                 messagebox.showinfo("Успех", "Профиль загружен")
             except Exception as e:
@@ -462,6 +723,7 @@ class MathSpecialistWindow:
             self.use_outlier_var.set(self.settings['use_outlier_filter'])
             self.use_median_var.set(self.settings['use_median_filter'])
             self.use_kalman_var.set(self.settings['use_kalman'])
+            self.current_preset = self.detect_preset()
             self.refresh_ui()
             messagebox.showinfo("Успех", "Настройки сброшены")
 
@@ -479,6 +741,14 @@ class MathSpecialistWindow:
         self.window.destroy()
         if self.parent:
             self.parent.deiconify()
+
+    def _handle_tk_callback_exception(self, exc, val, tb):
+        try:
+            print("Tk callback exception:")
+            import traceback
+            traceback.print_exception(exc, val, tb)
+        except Exception:
+            pass
 
     def on_closing(self):
         self.go_back()
