@@ -65,10 +65,10 @@ class StarburstEllipseFitter:
         :param min_ellipse_points: минимальное количество точек для подгонки эллипса
         :param use_gradient_direction: учитывать ли направление градиента (от тёмного к светлому)
         """
-        self.num_rays = num_rays
-        self.ray_length = ray_length
-        self.gradient_threshold = gradient_threshold
-        self.min_ellipse_points = min_ellipse_points
+        self.num_rays = int(num_rays)
+        self.ray_length = int(ray_length)
+        self.gradient_threshold = int(gradient_threshold)
+        self.min_ellipse_points = int(min_ellipse_points)
         self.use_gradient_direction = use_gradient_direction
 
     def find_pupil(self, gray_roi: np.ndarray, roi_offset_x: int, roi_offset_y: int,
@@ -210,6 +210,7 @@ class EyeTracker:
         self.cap = None
         self.is_running = False
         self.tracker_enabled = True
+        self.latest_face_landmarks = None
 
         # Данные глаз (после всех фильтров и классификации)
         self.left_eye = {'x': 0, 'y': 0, 'diameter': 0, 'speed': 0, 'movement': 'unknown'}
@@ -302,34 +303,34 @@ class EyeTracker:
             if 'max_jump_distance' in settings:
                 self.max_jump_distance = settings['max_jump_distance']
             if 'median_filter_size' in settings:
-                self.median_filter_size = settings['median_filter_size']
+                self.median_filter_size = int(settings['median_filter_size'])
                 if self.use_median_filter:
-                    self.left_x_buffer = deque(maxlen=self.median_filter_size)
-                    self.left_y_buffer = deque(maxlen=self.median_filter_size)
-                    self.right_x_buffer = deque(maxlen=self.median_filter_size)
-                    self.right_y_buffer = deque(maxlen=self.median_filter_size)
-                    self.left_d_buffer = deque(maxlen=self.median_filter_size)
-                    self.right_d_buffer = deque(maxlen=self.median_filter_size)
+                    self.left_x_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.left_y_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.right_x_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.right_y_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.left_d_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.right_d_buffer = deque(maxlen=int(self.median_filter_size))
             if 'use_outlier_filter' in settings:
                 self.use_outlier_filter = settings['use_outlier_filter']
             if 'use_median_filter' in settings:
                 self.use_median_filter = settings['use_median_filter']
                 if self.use_median_filter:
-                    self.left_x_buffer = deque(maxlen=self.median_filter_size)
-                    self.left_y_buffer = deque(maxlen=self.median_filter_size)
-                    self.right_x_buffer = deque(maxlen=self.median_filter_size)
-                    self.right_y_buffer = deque(maxlen=self.median_filter_size)
-                    self.left_d_buffer = deque(maxlen=self.median_filter_size)
-                    self.right_d_buffer = deque(maxlen=self.median_filter_size)
+                    self.left_x_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.left_y_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.right_x_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.right_y_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.left_d_buffer = deque(maxlen=int(self.median_filter_size))
+                    self.right_d_buffer = deque(maxlen=int(self.median_filter_size))
             # Параметры Starburst
             if 'starburst_num_rays' in settings:
-                self.starburst_num_rays = settings['starburst_num_rays']
+                self.starburst_num_rays = int(settings['starburst_num_rays'])
             if 'starburst_ray_length' in settings:
-                self.starburst_ray_length = settings['starburst_ray_length']
+                self.starburst_ray_length = int(settings['starburst_ray_length'])
             if 'starburst_gradient_threshold' in settings:
-                self.starburst_gradient_threshold = settings['starburst_gradient_threshold']
+                self.starburst_gradient_threshold = int(settings['starburst_gradient_threshold'])
             if 'starburst_min_ellipse_points' in settings:
-                self.starburst_min_ellipse_points = settings['starburst_min_ellipse_points']
+                self.starburst_min_ellipse_points = int(settings['starburst_min_ellipse_points'])
             if 'use_gradient_direction' in settings:
                 self.use_gradient_direction = settings['use_gradient_direction']
 
@@ -384,6 +385,7 @@ class EyeTracker:
         self.current_movement = 'fixation'
         self.movement_start_time = 0
         self.movement_end_time = 0
+        self.latest_face_landmarks = None
 
         if self.use_kalman:
             self.kalman_left = KalmanFilter2D(self.kalman_process_noise, self.kalman_measurement_noise)
@@ -413,7 +415,7 @@ class EyeTracker:
             print(f"Ошибка скачивания модели: {e}")
             return False
 
-    def start(self, frame_callback=None):
+    def start(self, frame_callback=None, use_internal_camera=False):
         self.frame_callback = frame_callback
         self.is_running = True
         self.tracker_enabled = True
@@ -431,12 +433,14 @@ class EyeTracker:
         )
         self.landmarker = vision.FaceLandmarker.create_from_options(options)
 
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap = None
+        if use_internal_camera:
+            self.cap = cv2.VideoCapture(0)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.start_time = time.time()
         self.last_frame_time = time.time()
-        return self.cap.isOpened()
+        return True if self.cap is None else self.cap.isOpened()
 
     def stop(self):
         self.is_running = False
@@ -658,6 +662,7 @@ class EyeTracker:
             return
 
         face_landmarks = result.face_landmarks[0]
+        self.latest_face_landmarks = face_landmarks
         frame_rgb = output_image.numpy_view()
 
         # Получаем данные для глаз (Starburst)
@@ -702,13 +707,6 @@ class EyeTracker:
                 cv2.putText(frame, "R: not found", (50, 120),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-            # Отображаем текущее движение и скорость
-            if self.left_eye['speed'] > 0:
-                cv2.putText(frame, f"Speed: {self.left_eye['speed']:.1f} px/s", (10, 60),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                cv2.putText(frame, f"Movement: {self.left_eye['movement']}", (10, 80),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-
         status = "TRACKING ON" if self.tracker_enabled else "TRACKING OFF"
         color = (0, 255, 0) if self.tracker_enabled else (0, 0, 255)
         cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
@@ -717,10 +715,10 @@ class EyeTracker:
 
     def process_frame(self, frame):
         """Обработка одного кадра для реального времени"""
-        if not self.is_running or not self.cap:
+        if not self.is_running:
             return frame
 
-        if self.tracker_enabled:
+        if self.tracker_enabled and self.landmarker is not None:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             frame_timestamp_ms = int(time.time() * 1000)

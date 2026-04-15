@@ -320,6 +320,7 @@ class VideoPlayerWindow:
         self.current_frame = 0
         self.playing_video = False
         self.landmarker = None
+        self.tracker = EyeTracker()  # Создаем трекер для загрузки настроек
 
         self.create_window()
 
@@ -334,6 +335,9 @@ class VideoPlayerWindow:
 
         main_frame = tk.Frame(self.window)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Загружаем текущие настройки из трекера
+        self.load_tracker_settings()
 
         control_frame = tk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=(0, 10))
@@ -442,7 +446,7 @@ class VideoPlayerWindow:
         tk.Label(scrollable_frame, text="Сглаживание траектории:", font=("Arial", 10, "bold")).pack(pady=(10, 5))
         smoothing_frame = tk.Frame(scrollable_frame)
         smoothing_frame.pack(fill=tk.X, pady=2)
-        self.smoothing_var = tk.DoubleVar(value=0.6)
+        # self.smoothing_var уже установлен в load_tracker_settings
         smoothing_scale = tk.Scale(
             smoothing_frame,
             from_=0.1, to=0.9,
@@ -459,7 +463,7 @@ class VideoPlayerWindow:
         # 2. Фильтр резких скачков
         jump_frame = tk.LabelFrame(scrollable_frame, text="Фильтр резких скачков", font=("Arial", 10, "bold"))
         jump_frame.pack(fill=tk.X, pady=10, padx=5)
-        self.use_jump_filter_var = tk.BooleanVar(value=True)
+        # self.use_jump_filter_var уже установлен
         tk.Checkbutton(
             jump_frame,
             text="Включить фильтр",
@@ -470,7 +474,7 @@ class VideoPlayerWindow:
         tk.Label(jump_frame, text="Макс. перемещение (пиксели):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         jump_scale_frame = tk.Frame(jump_frame)
         jump_scale_frame.pack(fill=tk.X, pady=2)
-        self.jump_limit_var = tk.DoubleVar(value=100)
+        # self.jump_limit_var уже установлен
         jump_scale = tk.Scale(
             jump_scale_frame,
             from_=20, to=300,
@@ -487,7 +491,7 @@ class VideoPlayerWindow:
         # 3. Фильтр дрожания
         shake_frame = tk.LabelFrame(scrollable_frame, text="Фильтр дрожания", font=("Arial", 10, "bold"))
         shake_frame.pack(fill=tk.X, pady=10, padx=5)
-        self.use_shake_filter_var = tk.BooleanVar(value=True)
+        # self.use_shake_filter_var уже установлен
         tk.Checkbutton(
             shake_frame,
             text="Включить фильтр",
@@ -498,7 +502,7 @@ class VideoPlayerWindow:
         tk.Label(shake_frame, text="Сила сглаживания:", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         shake_scale_frame = tk.Frame(shake_frame)
         shake_scale_frame.pack(fill=tk.X, pady=2)
-        self.shake_strength_var = tk.IntVar(value=3)
+        # self.shake_strength_var уже установлен
         shake_scale = tk.Scale(
             shake_scale_frame,
             from_=3, to=9,
@@ -518,7 +522,7 @@ class VideoPlayerWindow:
         tk.Label(detect_frame, text="Надёжность обнаружения лица:", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         detect_scale_frame = tk.Frame(detect_frame)
         detect_scale_frame.pack(fill=tk.X, pady=2)
-        self.detection_conf_var = tk.DoubleVar(value=0.5)
+        # self.detection_conf_var уже установлен
         detect_scale = tk.Scale(
             detect_scale_frame,
             from_=0.5, to=0.9,
@@ -538,7 +542,7 @@ class VideoPlayerWindow:
         tk.Label(local_frame, text="Чувствительность к границе:", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         grad_scale_frame = tk.Frame(local_frame)
         grad_scale_frame.pack(fill=tk.X, pady=2)
-        self.gradient_thresh_var = tk.IntVar(value=15)
+        # self.gradient_thresh_var уже установлен
         grad_scale = tk.Scale(
             grad_scale_frame,
             from_=10, to=30,
@@ -559,7 +563,7 @@ class VideoPlayerWindow:
         tk.Label(class_frame, text="Порог скорости (пикс/сек):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         vel_scale_frame = tk.Frame(class_frame)
         vel_scale_frame.pack(fill=tk.X, pady=2)
-        self.velocity_thresh_var = tk.IntVar(value=100)
+        # self.velocity_thresh_var уже установлен
         vel_scale = tk.Scale(
             vel_scale_frame,
             from_=50, to=300,
@@ -576,7 +580,7 @@ class VideoPlayerWindow:
         tk.Label(class_frame, text="Мин. длительность фиксации (мс):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         fix_scale_frame = tk.Frame(class_frame)
         fix_scale_frame.pack(fill=tk.X, pady=2)
-        self.fixation_dur_var = tk.IntVar(value=40)
+        # self.fixation_dur_var уже установлен
         fix_scale = tk.Scale(
             fix_scale_frame,
             from_=40, to=200,
@@ -593,7 +597,7 @@ class VideoPlayerWindow:
         tk.Label(class_frame, text="Мин. длительность саккады (мс):", font=("Arial", 9)).pack(anchor="w", pady=(5,0))
         sacc_scale_frame = tk.Frame(class_frame)
         sacc_scale_frame.pack(fill=tk.X, pady=2)
-        self.saccade_dur_var = tk.IntVar(value=10)
+        # self.saccade_dur_var уже установлен
         sacc_scale = tk.Scale(
             sacc_scale_frame,
             from_=10, to=50,
@@ -763,9 +767,9 @@ class VideoPlayerWindow:
             base_options=base_options,
             running_mode=vision.RunningMode.VIDEO,
             num_faces=1,
-            min_face_detection_confidence=0.5,
-            min_face_presence_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_face_detection_confidence=self.processor.tracker.min_detection_confidence,
+            min_face_presence_confidence=self.processor.tracker.min_presence_confidence,
+            min_tracking_confidence=self.processor.tracker.min_tracking_confidence
         )
 
         self.landmarker = vision.FaceLandmarker.create_from_options(options)
@@ -960,6 +964,23 @@ class VideoPlayerWindow:
             self.save_btn.config(state=tk.DISABLED)
         else:
             messagebox.showerror("Ошибка", "Не удалось сохранить данные")
+
+    def load_tracker_settings(self):
+        """Загрузка настроек из трекера и установка значений ползунков"""
+        # Загружаем настройки из файла
+        self.tracker.load_settings_from_file()
+        
+        # Устанавливаем значения переменных на основе загруженных настроек
+        self.smoothing_var = tk.DoubleVar(value=self.tracker.smoothing_factor)
+        self.use_jump_filter_var = tk.BooleanVar(value=self.tracker.use_outlier_filter)
+        self.jump_limit_var = tk.DoubleVar(value=self.tracker.max_jump_distance)
+        self.use_shake_filter_var = tk.BooleanVar(value=self.tracker.use_median_filter)
+        self.shake_strength_var = tk.IntVar(value=self.tracker.median_filter_size)
+        self.detection_conf_var = tk.DoubleVar(value=self.tracker.min_detection_confidence)
+        self.gradient_thresh_var = tk.IntVar(value=self.tracker.starburst.gradient_threshold)
+        self.velocity_thresh_var = tk.IntVar(value=self.tracker.velocity_threshold)
+        self.fixation_dur_var = tk.IntVar(value=int(self.tracker.min_fixation_duration * 1000))
+        self.saccade_dur_var = tk.IntVar(value=int(self.tracker.min_saccade_duration * 1000))
 
     def on_closing(self):
         if self.playing_video:

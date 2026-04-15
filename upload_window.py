@@ -55,7 +55,7 @@ class UploadWindow:
             fg="white",
             command=self.show_users_list
         )
-        list_users_btn.pack(side=tk.LEFT, padx=10)
+        list_users_btn.pack(pady=5)
         
         # Кнопка "Создать пользователя"
         create_user_btn = tk.Button(
@@ -68,7 +68,7 @@ class UploadWindow:
             fg="white",
             command=self.create_user
         )
-        create_user_btn.pack(side=tk.LEFT, padx=10)
+        create_user_btn.pack(pady=5)
         
         # Кнопка "Назад"
         back_btn = tk.Button(
